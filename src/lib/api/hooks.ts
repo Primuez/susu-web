@@ -31,6 +31,7 @@ import {
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
+import { useMemo } from 'react';
 import { isRetryableApiError } from './errors';
 import { getAccessToken } from './token';
 import {
@@ -187,10 +188,63 @@ const RECEIPT_POLL_MS = 5_000;
  * either because no Susu contract was touched or because something is wrong with
  * the indexer.
  */
-const RECEIPT_MAX_POLLS = 36;
+export const RECEIPT_MAX_POLLS = 36;
+
+export type ReceiptPollTracker = {
+  hash: string | undefined;
+  missingCount: number;
+};
 
 function isAbsentFromIndex(error: unknown): boolean {
   return (error as { status?: unknown } | null)?.status === 404;
+}
+
+/**
+ * The query options are separate from the hook so the exact polling lifecycle can
+ * be exercised without a browser. `missingCount` is the sole budget counter: it
+ * decides both whether another request is scheduled and whether the hook reports
+ * that the receipt is absent.
+ */
+export function transactionReceiptQueryOptions(
+  hash: string | undefined,
+  tracker: ReceiptPollTracker,
+) {
+  if (tracker.hash !== hash) {
+    tracker.hash = hash;
+    tracker.missingCount = 0;
+  }
+
+  return {
+    queryKey: apiQueryKeys.transaction(hash ?? ''),
+    enabled: hash !== undefined,
+    queryFn: async ({ signal }: { signal: AbortSignal }) => {
+      if (hash === undefined) throw new Error('A transaction hash is required.');
+
+      try {
+        const receipt = await getTransactionReceipt(hash, signal);
+        tracker.missingCount = 0;
+        return receipt;
+      } catch (error) {
+        tracker.missingCount = isAbsentFromIndex(error) ? tracker.missingCount + 1 : 0;
+        throw error;
+      }
+    },
+    retry: retryRead,
+    refetchInterval: (query: { state: { error: Error | null } }): number | false =>
+      isAbsentFromIndex(query.state.error) && tracker.missingCount < RECEIPT_MAX_POLLS
+        ? RECEIPT_POLL_MS
+        : false,
+  };
+}
+
+export function isReceiptAbsent(
+  error: unknown,
+  data: TransactionReceipt | undefined,
+  tracker: ReceiptPollTracker,
+): boolean {
+  return (
+    isAbsentFromIndex(error) && tracker.missingCount >= RECEIPT_MAX_POLLS && data === undefined
+  );
 }
 
 /**
@@ -210,26 +264,12 @@ function isAbsentFromIndex(error: unknown): boolean {
 export function useTransactionReceipt(
   hash: string | undefined,
 ): UseQueryResult<TransactionReceipt, Error> & { readonly isAbsent: boolean } {
-  const query = useQuery<TransactionReceipt, Error>({
-    queryKey: apiQueryKeys.transaction(hash ?? ''),
-    enabled: hash !== undefined,
-    queryFn: async ({ signal }) => {
-      if (hash === undefined) throw new Error('A transaction hash is required.');
-      return getTransactionReceipt(hash, signal);
-    },
-    retry: retryRead,
-    refetchInterval: (query) =>
-      isAbsentFromIndex(query.state.error) && query.state.fetchFailureCount < RECEIPT_MAX_POLLS
-        ? RECEIPT_POLL_MS
-        : false,
-  });
+  const tracker = useMemo<ReceiptPollTracker>(() => ({ hash, missingCount: 0 }), [hash]);
+  const query = useQuery<TransactionReceipt, Error>(transactionReceiptQueryOptions(hash, tracker));
 
   // Still waiting distinguishes "keep watching" from "this will never appear",
   // using the same two facts the polling interval does.
-  const isAbsent =
-    isAbsentFromIndex(query.error) &&
-    query.failureCount >= RECEIPT_MAX_POLLS &&
-    query.data === undefined;
+  const isAbsent = isReceiptAbsent(query.error, query.data, tracker);
 
   // A copy, not a mutation: React Query may return the same result object across
   // renders, and attaching a property to it would leak this hook's concern into a
