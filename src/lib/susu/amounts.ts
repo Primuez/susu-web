@@ -127,14 +127,37 @@ export function parseBaseUnits(value: string): bigint {
 }
 
 /**
+ * What a displayed amount becomes when the index reports something that is not
+ * a base-unit amount.
+ *
+ * An em dash rather than a zero, because a screen that reports money must never
+ * make "we do not know" and "there is none" look the same. Callers append their
+ * own unit, so what renders is `— USDC`: the slot stays honest about what is
+ * missing without inventing a figure.
+ */
+export const AMOUNT_UNAVAILABLE = '—';
+
+/**
  * Renders a base-unit string from the API for display.
  *
  * The companion to `parseUsdc`, going the other way: that function turns what a
  * person typed into stroops, this turns what the index reported into what a
  * person reads.
+ *
+ * Display is where a malformed value gets absorbed instead of thrown.
+ * `parseBaseUnits` still throws, and must: what a person typed, and what a
+ * transaction carries, has to be exact. This function runs during render, over
+ * data this process never validated, and one bad row blanking the whole page is
+ * a worse failure than one row showing no figure. So the throw is caught here
+ * and answered with `AMOUNT_UNAVAILABLE` — visibly absent, never a number this
+ * code invented. (#8)
  */
 export function formatBaseUnits(value: string): string {
-  return formatUsdc(parseBaseUnits(value));
+  try {
+    return formatUsdc(parseBaseUnits(value));
+  } catch {
+    return AMOUNT_UNAVAILABLE;
+  }
 }
 
 /**
