@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AMOUNT_UNAVAILABLE,
   I128_MAX,
   USDC_SCALE,
   formatBaseUnits,
@@ -197,5 +198,14 @@ describe('formatBaseUnits', () => {
 
   it('agrees with formatUsdc for the same value', () => {
     expect(formatBaseUnits('150000')).toBe(formatUsdc(150_000n));
+  });
+
+  it('renders the unavailable marker for a malformed amount instead of throwing', () => {
+    // Formatting happens during render, over rows this process never
+    // validated: one bad value must cost one figure, not the page. Parsing
+    // keeps its throwing contract — see above — display absorbs it. (#8)
+    for (const malformed of ['12.5', '', 'abc', '-1', '1e7']) {
+      expect(formatBaseUnits(malformed)).toBe(AMOUNT_UNAVAILABLE);
+    }
   });
 });
